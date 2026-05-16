@@ -66,7 +66,7 @@ templates_file = f"templates_{victim}.json"
 
 def llm(prompt):
     retries = 0
-    max_retries = 30
+    max_retries = 60
     while retries < max_retries:
       try:
         completion = client.chat.completions.create(
@@ -86,8 +86,16 @@ def llm(prompt):
             print("[reasoning_content]\n" + msg.reasoning_content)
         return text
       except Exception as e:
-        print(f"[llm] error: {e}; retry {retries + 1}/{max_retries}")
-        time.sleep(2)
+        err_str = str(e)
+        is_rate_limit = ("429" in err_str) or ("rate" in err_str.lower()) or ("饱和" in err_str) or ("overload" in err_str.lower())
+        # 429/产能饱和：30~120s 等待；其他错误：指数退避 2,4,8,...,60s 封顶
+        if is_rate_limit:
+            wait = min(120, 30 + retries * 10)
+        else:
+            wait = min(60, 2 ** min(retries, 6))
+        print(f"[llm] error: {e}; retry {retries + 1}/{max_retries} after {wait}s")
+        sys.stdout.flush() if hasattr(sys.stdout, 'flush') else None
+        time.sleep(wait)
         retries += 1
         if retries == max_retries:
           print("Max retries reached. Execution failed")
