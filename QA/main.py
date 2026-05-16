@@ -13,6 +13,7 @@ import openai
 from openai import OpenAI
 import time
 from datetime import datetime
+from tqdm import tqdm
 
 # ============ API 配置（gpt.ge 代理 + DeepSeek-R1） ============
 API_KEY = open('OpenAI_api_key.txt').readline().strip()
@@ -27,6 +28,14 @@ timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 log_filename = f"logs/program_output_{timestamp}.log"
 log_file = open(log_filename, "w")
 sys.stdout = log_file
+
+# 终端句柄（不受 stdout 重定向影响）—— 用于进度条和关键提示
+_TTY = sys.__stderr__
+
+def show(msg):
+    """同时写日志和终端。重要提示用这个，普通 print 只进日志。"""
+    print(msg)
+    print(msg, file=_TTY, flush=True)
 
 
 # victim="food" 在 high_school_chemistry_test 里没有匹配，
@@ -66,7 +75,7 @@ templates_file = f"templates_{victim}.json"
 
 def llm(prompt):
     retries = 0
-    max_retries = 30
+    max_retries = 60
     while retries < max_retries:
       try:
         completion = client.chat.completions.create(
@@ -86,8 +95,15 @@ def llm(prompt):
             print("[reasoning_content]\n" + msg.reasoning_content)
         return text
       except Exception as e:
-        print(f"[llm] error: {e}; retry {retries + 1}/{max_retries}")
-        time.sleep(2)
+        err_str = str(e)
+        is_rate_limit = ("429" in err_str) or ("rate" in err_str.lower()) or ("饱和" in err_str) or ("overload" in err_str.lower())
+        # 429/产能饱和：30~120s 等待；其他错误：指数退避 2,4,8,...,60s 封顶
+        if is_rate_limit:
+            wait = min(120, 30 + retries * 10)
+        else:
+            wait = min(60, 2 ** min(retries, 6))
+        show(f"[llm] error: {str(e)[:160]}; retry {retries + 1}/{max_retries} after {wait}s")
+        time.sleep(wait)
         retries += 1
         if retries == max_retries:
           print("Max retries reached. Execution failed")
@@ -356,7 +372,81 @@ is_correct = False
 with open('initial_demo.txt', 'r') as file:
     initial_demo = file.read()
 
-for i in range(total_length):
+# ============ 断点续跑 ============
+PROGRESS_FILE = "progress.json"
+
+def _run_sig():
+    """这些参数任何一个变了，旧 progress 都会被作废重跑。"""
+    return {
+        "data_path": args.data_path,
+        "seed": args.seed,
+        "n_shots": args.n_shots,
+        "num_benign": num_benign,
+        "num_templates": num_templates,
+        "num_test": num_test,
+        "model": args.core_model,
+    }
+
+def save_progress(phase, i, test_i):
+    state = {
+        "sig": _run_sig(),
+        "phase": phase,
+        "i": i,
+        "test_i": test_i,
+        "benign_counter": benign_counter,
+        "malicious_counter": malicious_counter,
+        "inject_counter": inject_counter,
+        "test_counter": test_counter,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    tmp = PROGRESS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, PROGRESS_FILE)  # 原子替换，避免写到一半崩了
+
+def load_progress():
+    if not os.path.exists(PROGRESS_FILE):
+        return None
+    try:
+        with open(PROGRESS_FILE) as f:
+            state = json.load(f)
+        if state.get("sig") != _run_sig():
+            show("[resume] progress.json 与当前参数不匹配（数据集/种子/模型变了），忽略旧进度，从头开始")
+            return None
+        return state
+    except Exception as e:
+        show(f"[resume] 读取 progress.json 失败：{e}，从头开始")
+        return None
+
+resumed = load_progress()
+if resumed:
+    resume_train_i = resumed["i"]
+    resume_test_i = resumed["test_i"]
+    benign_counter = resumed["benign_counter"]
+    malicious_counter = resumed["malicious_counter"]
+    inject_counter = resumed["inject_counter"]
+    test_counter = resumed["test_counter"]
+    if os.path.exists(args.memory_path):
+        with open(args.memory_path) as f:
+            current_memory = json.load(f)
+    if os.path.exists("memory_test.json"):
+        with open("memory_test.json") as f:
+            test_memory = json.load(f)
+    show(f"[resume] 从 phase={resumed['phase']} 续跑 — train={resume_train_i}/{total_length}, test={resume_test_i}/{num_test}, mem={len(current_memory)}（上次保存 {resumed['saved_at']}）")
+else:
+    resume_train_i = 0
+    resume_test_i = 0
+    show(f"[start] 全新运行 — train={total_length}题 + test={num_test}题 — 模型={args.core_model}")
+    show(f"[start] 日志：{log_filename}（另开终端 tail -f 看详情）")
+
+# ============ 训练阶段 ============
+train_bar = tqdm(total=total_length, initial=resume_train_i, file=_TTY,
+                 desc="train", dynamic_ncols=True, mininterval=0.5)
+for i in range(resume_train_i, total_length):
+    train_bar.set_postfix(kind=("benign" if index[i] == 0 else "inject"),
+                          b=benign_counter, m=malicious_counter,
+                          inj=f"{inject_counter}/{num_templates}",
+                          mem=len(current_memory))
     print('-----------------')
     print(i+1)
     memory = current_memory[:]
@@ -425,10 +515,22 @@ for i in range(total_length):
         with open(args.memory_path, "w") as file:
             json.dump(current_memory, file, indent=4)
 
-with open('memory.json', 'r') as f:
-    memory = json.load(f)
+    save_progress("train", i + 1, 0)
+    train_bar.update(1)
+train_bar.close()
 
-for i in range(num_test):
+# memory.json 可能不存在（极端情况：所有 train 题都没成功累积），兜底
+if os.path.exists('memory.json'):
+    with open('memory.json', 'r') as f:
+        memory = json.load(f)
+else:
+    memory = []
+
+# ============ 测试阶段 ============
+test_bar = tqdm(total=num_test, initial=resume_test_i, file=_TTY,
+                desc="test", dynamic_ncols=True, mininterval=0.5)
+for i in range(resume_test_i, num_test):
+    test_bar.set_postfix(asr=f"{test_counter}/{i}")
     print('-----------------')
     print(i+1)
     data = test_questions[i]
@@ -455,9 +557,15 @@ for i in range(num_test):
     with open("memory_test.json", "w") as file:
             json.dump(test_memory, file, indent=4)
 
+    save_progress("test" if i + 1 < num_test else "done", total_length, i + 1)
+    test_bar.update(1)
+test_bar.close()
 
-print("inject success rate: ", inject_counter/num_templates)
-print("attack success rate: ", test_counter/num_test)
+show("")
+show("=" * 50)
+show(f"inject success rate: {inject_counter/num_templates:.4f}  ({inject_counter}/{num_templates})")
+show(f"attack success rate: {test_counter/num_test:.4f}  ({test_counter}/{num_test})")
+show("=" * 50)
 
 log_file.close()
 sys.stdout = sys.__stdout__
