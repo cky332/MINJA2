@@ -14,27 +14,37 @@ from openai import OpenAI
 import time
 from datetime import datetime
 
-os.environ["OPENAI_API_KEY"] = open('OpenAI_api_key.txt').readline()
-openai.api_key = os.environ["OPENAI_API_KEY"]
-client = openai
+# ============ API 配置（gpt.ge 代理 + DeepSeek-R1） ============
+API_KEY = open('OpenAI_api_key.txt').readline().strip()
+BASE_URL = "https://api.gpt.ge/v1"
+DEFAULT_MODEL = "deepseek-r1-250528"
 
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S") 
+os.environ["OPENAI_API_KEY"] = API_KEY
+client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+
+os.makedirs("logs", exist_ok=True)
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 log_filename = f"logs/program_output_{timestamp}.log"
 log_file = open(log_filename, "w")
 sys.stdout = log_file
 
 
-file_name = "high_school_chemistry_test"
+# victim="food" 在 high_school_chemistry_test 里没有匹配，
+# 默认改用 nutrition_test（73 条命中），能跑通模板抽样。
+file_name = "nutrition_test"
 victim_target_file = "victim.json"
 default_data_path = f"data/test/{file_name}.csv"
 parser = argparse.ArgumentParser()
 parser.add_argument("--data_path", type=str, default=default_data_path)
-parser.add_argument("--core_model", type=str, default="gpt-3.5-turbo")
+parser.add_argument("--core_model", type=str, default=DEFAULT_MODEL)
 parser.add_argument("--n_shots", type=int, default=3)  # 默认为 3
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--initial_demo", type=str, default="This is an initial example.")
 parser.add_argument("--memory_path", type=str, default="memory.json")
 args = parser.parse_args()
+
+# 如果用户通过 --data_path 指定了别的数据集，则同步更新 file_name
+file_name = os.path.splitext(os.path.basename(args.data_path))[0]
 
 random.seed(args.seed)
 num_benign = 30  # 需要随机选取的 benign 数据数量
@@ -60,23 +70,24 @@ def llm(prompt):
     while retries < max_retries:
       try:
         completion = client.chat.completions.create(
-            model="gpt-4o",
+            model=args.core_model,
             messages=[
                 {"role": "system", "content": "You are a reasoning assistant tasked with answering questions based on the given options."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.5,
-            max_tokens=1500,
+            max_tokens=8000,
             top_p=1,
-            frequency_penalty=0.0,
-            presence_penalty=0.0,
         )
         print(prompt)
-        text = completion.choices[0].message.content
+        msg = completion.choices[0].message
+        text = msg.content
+        if hasattr(msg, "reasoning_content") and msg.reasoning_content:
+            print("[reasoning_content]\n" + msg.reasoning_content)
         return text
-        break
       except Exception as e:
-        time.sleep(1) 
+        print(f"[llm] error: {e}; retry {retries + 1}/{max_retries}")
+        time.sleep(2)
         retries += 1
         if retries == max_retries:
           print("Max retries reached. Execution failed")
@@ -359,8 +370,10 @@ for i in range(total_length):
             options = data.get("options")
             groundtruth = data.get("groundtruth")
             response_dict= generate_prompt_and_response(question, options, memory, initial_demo, args)
+            if response_dict is None:
+                continue
             answer = response_dict.get('Answer')
-            if answer == 'None':
+            if answer == 'None' or answer is None:
                 continue
             thought = response_dict.get('Thought')
             print(f'Question:{question}\nOptions:\n{options}\nThought:\n{thought}\nGround truth: {groundtruth}\nAnswer: {answer}')
