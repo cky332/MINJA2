@@ -57,9 +57,12 @@ args = parser.parse_args()
 file_name = os.path.splitext(os.path.basename(args.data_path))[0]
 
 random.seed(args.seed)
-num_benign = 30  # 需要随机选取的 benign 数据数量
-num_templates = 10  # 需要随机选取的 template 数据数量
-num_test = 10  # 需要随机选取的 test 数据数量
+# 论文 MMLU per-pair 配置：30 benign / 10 attack templates / 10 test queries。
+# num_test 这里调到 30 是为了在单 pair 下把 ASR 估计的 1-σ 从 ~15% 压到 ~9%；
+# 想严格复现论文 GPT-4 那一行就把 num_test 调回 10。
+num_benign = 30      # paper-default
+num_templates = 10   # paper-default for MMLU (其它数据集是 15)
+num_test = 30        # paper-default 10; bumped to reduce single-pair variance
 input_file = f"{file_name}.json"
 
 
