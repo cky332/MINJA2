@@ -36,6 +36,37 @@ TOOL_PARSER="${TOOL_PARSER:-hermes}"   # hermes for Qwen2.5; llama3_json for Lla
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 
+# Make torch's bundled CUDA libs win over any system CUDA in LD_LIBRARY_PATH
+# (e.g. /usr/local/cuda-12.2/lib64). Without this, torch 2.5 + the CUDA 12.4
+# nvidia-*-cu12 wheels crash on import with
+#   undefined symbol: __nvJitLinkComplete_12_4
+# because the dynamic linker picks the older libnvJitLink.so.12 from the
+# system CUDA dir before torch's bundled one.
+_PIP_NVIDIA_LIB_DIRS=$(python - <<'PY' 2>/dev/null || true
+import os, pkgutil, importlib.util
+try:
+    import nvidia
+except ImportError:
+    raise SystemExit
+dirs = []
+for _, name, ispkg in pkgutil.iter_modules(nvidia.__path__):
+    if not ispkg:
+        continue
+    spec = importlib.util.find_spec(f"nvidia.{name}")
+    if not spec or not spec.submodule_search_locations:
+        continue
+    for base in spec.submodule_search_locations:
+        lib = os.path.join(base, "lib")
+        if os.path.isdir(lib):
+            dirs.append(lib)
+print(":".join(dirs))
+PY
+)
+if [ -n "${_PIP_NVIDIA_LIB_DIRS:-}" ]; then
+    export LD_LIBRARY_PATH="${_PIP_NVIDIA_LIB_DIRS}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    echo "[vllm] prepended pip nvidia libs to LD_LIBRARY_PATH"
+fi
+
 echo "[vllm] model=$MODEL_PATH served-as=$SERVED_NAME tp=$TP port=$PORT"
 echo "[vllm] CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
