@@ -3,6 +3,56 @@ import random
 import json
 import csv
 import os, sys
+
+
+def _ensure_torch_cuda_libs():
+    """Make torch's bundled CUDA libs (the nvidia-*-cu12 pip wheels) take
+    precedence over any system CUDA dir in LD_LIBRARY_PATH.
+
+    Symptom this fixes: on hosts with /usr/local/cuda-12.2/lib64 (or similar
+    older CUDA) in LD_LIBRARY_PATH, importing torch 2.5+ crashes with
+        undefined symbol: __nvJitLinkComplete_12_4
+    because the dynamic linker picks the older libnvJitLink.so.12 from the
+    system dir before torch's bundled one.
+
+    LD_LIBRARY_PATH is consulted by the loader at process startup, so we
+    re-exec Python once with the corrected env. A marker env var prevents
+    an infinite re-exec loop. No-op when no nvidia-*-cu12 wheels are installed
+    (e.g. CPU-only Python — Levenshtein mode doesn't need this).
+    """
+    if os.environ.get("_MINJA_LDPATH_FIXED") == "1":
+        return
+    try:
+        import nvidia, importlib.util, pkgutil  # noqa: E401
+    except ImportError:
+        return
+    dirs = []
+    for _, name, ispkg in pkgutil.iter_modules(nvidia.__path__):
+        if not ispkg:
+            continue
+        spec = importlib.util.find_spec(f"nvidia.{name}")
+        if not spec or not spec.submodule_search_locations:
+            continue
+        for base in spec.submodule_search_locations:
+            lib = os.path.join(base, "lib")
+            if os.path.isdir(lib):
+                dirs.append(lib)
+    if not dirs:
+        return
+    prefix = ":".join(dirs)
+    current = os.environ.get("LD_LIBRARY_PATH", "")
+    if current.startswith(prefix):
+        os.environ["_MINJA_LDPATH_FIXED"] = "1"
+        return
+    os.environ["LD_LIBRARY_PATH"] = prefix + (":" + current if current else "")
+    os.environ["_MINJA_LDPATH_FIXED"] = "1"
+    print(f"[ld_fix] prepended {len(dirs)} pip nvidia/*/lib dirs to LD_LIBRARY_PATH; re-execing",
+          file=sys.stderr)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+_ensure_torch_cuda_libs()
+
 import numpy as np
 import Levenshtein
 from config import OpenaiConfig
