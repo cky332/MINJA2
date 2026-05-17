@@ -51,18 +51,22 @@ parser.add_argument("--n_shots", type=int, default=3)  # 默认为 3
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--initial_demo", type=str, default="This is an initial example.")
 parser.add_argument("--memory_path", type=str, default="memory.json")
+# Sample sizes — defaults match the paper's MMLU per-pair configuration.
+parser.add_argument("--num_benign", type=int, default=30,
+                    help="paper-default for MMLU is 30")
+parser.add_argument("--num_templates", type=int, default=10,
+                    help="paper-default for MMLU is 10 (15 for non-MMLU datasets)")
+parser.add_argument("--num_test", type=int, default=10,
+                    help="paper-default for MMLU is 10; bump to ~30 to reduce 1-σ on the single-pair ASR estimate")
 args = parser.parse_args()
 
 # 如果用户通过 --data_path 指定了别的数据集，则同步更新 file_name
 file_name = os.path.splitext(os.path.basename(args.data_path))[0]
 
 random.seed(args.seed)
-# 论文 MMLU per-pair 配置：30 benign / 10 attack templates / 10 test queries。
-# num_test 这里调到 30 是为了在单 pair 下把 ASR 估计的 1-σ 从 ~15% 压到 ~9%；
-# 想严格复现论文 GPT-4 那一行就把 num_test 调回 10。
-num_benign = 30      # paper-default
-num_templates = 10   # paper-default for MMLU (其它数据集是 15)
-num_test = 30        # paper-default 10; bumped to reduce single-pair variance
+num_benign = args.num_benign
+num_templates = args.num_templates
+num_test = args.num_test
 input_file = f"{file_name}.json"
 
 
@@ -169,10 +173,23 @@ def generate_questions(input_file, templates_file, victim_target_file, num_templ
     with open(templates_file, 'r') as file:
         templates_contents = json.load(file)
 
-    # 提取 template_questions 和 test_questions
-    template_questions = random.sample(templates_contents, num_templates)
+    # 提取 template_questions 和 test_questions —— 池子不够时自动降级，避免崩掉
+    pool = len(templates_contents)
+    needed = num_templates + num_test
+    if pool < needed:
+        # 按比例缩，保留 templates : test 的原始比，至少各留 1 条
+        keep_tmpl = max(1, int(round(num_templates * pool / needed)))
+        keep_test = max(1, pool - keep_tmpl)
+        show(f"[generate_questions] WARN: only {pool} victim-bearing questions in pool "
+             f"(need {needed} = {num_templates} templates + {num_test} test). "
+             f"Auto-shrink to {keep_tmpl} templates + {keep_test} test.")
+        n_tmpl, n_test = keep_tmpl, keep_test
+    else:
+        n_tmpl, n_test = num_templates, num_test
+
+    template_questions = random.sample(templates_contents, n_tmpl)
     remaining_templates = [item for item in templates_contents if item not in template_questions]
-    test_questions = random.sample(remaining_templates, num_test)
+    test_questions = random.sample(remaining_templates, n_test)
 
     # 从 input_file 中去掉与 templates 中 question 相同的数据
     template_questions_text = {item["question"] for item in templates_contents}
