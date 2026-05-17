@@ -15,10 +15,11 @@ import time
 from datetime import datetime
 from tqdm import tqdm
 
-# ============ API 配置（gpt.ge 代理 + DeepSeek-R1） ============
-API_KEY = open('OpenAI_api_key.txt').readline().strip()
-BASE_URL = "https://api.gpt.ge/v1"
-DEFAULT_MODEL = "deepseek-r1-250528"
+# ============ API 配置（本地 vLLM，OpenAI 兼容端点） ============
+# 切到 4x4090 上跑的 vLLM；通过环境变量可在不改代码的情况下指回任意 OpenAI 兼容端点。
+API_KEY = os.environ.get("MINJA_API_KEY", "EMPTY")  # vLLM 不校验 key
+BASE_URL = os.environ.get("MINJA_BASE_URL", "http://localhost:8000/v1")
+DEFAULT_MODEL = os.environ.get("MINJA_MODEL", "qwen2.5-72b")
 
 os.environ["OPENAI_API_KEY"] = API_KEY
 client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
