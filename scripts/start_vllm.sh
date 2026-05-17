@@ -36,6 +36,22 @@ TOOL_PARSER="${TOOL_PARSER:-hermes}"   # hermes for Qwen2.5; llama3_json for Lla
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 
+# Preflight: if MODEL_PATH looks like a local path, fail fast with a clear
+# message when the directory is missing. Otherwise (e.g. "Qwen/Qwen2.5-72B-
+# Instruct-AWQ") let vLLM resolve it as a HuggingFace repo id and download.
+case "$MODEL_PATH" in
+    /*|~/*|./*|../*)
+        if [ ! -d "$MODEL_PATH" ]; then
+            echo "[vllm] ERROR: MODEL_PATH does not exist locally: $MODEL_PATH" >&2
+            echo "[vllm] hint: override it, e.g." >&2
+            echo "[vllm]   MODEL_PATH=\$HOME/data/models/Qwen2.5-72B-AWQ bash scripts/start_vllm.sh" >&2
+            echo "[vllm] hint: or pass a HuggingFace repo id to auto-download, e.g." >&2
+            echo "[vllm]   MODEL_PATH=Qwen/Qwen2.5-72B-Instruct-AWQ bash scripts/start_vllm.sh" >&2
+            exit 1
+        fi
+        ;;
+esac
+
 # Make torch's bundled CUDA libs win over any system CUDA in LD_LIBRARY_PATH
 # (e.g. /usr/local/cuda-12.2/lib64). Without this, torch 2.5 + the CUDA 12.4
 # nvidia-*-cu12 wheels crash on import with
