@@ -6,11 +6,17 @@
 #
 # Usage:
 #   1. conda activate vllm  (env with `pip install vllm==0.7.3`)
-#   2. Download weights once:
-#      HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download \
-#          Qwen/Qwen2.5-72B-Instruct-AWQ \
+#   2. Download weights once (huggingface_hub >= 0.30 uses `hf`, not `huggingface-cli`):
+#      hf download Qwen/Qwen2.5-72B-Instruct-AWQ \
 #          --local-dir /data/models/Qwen2.5-72B-AWQ
+#      # Optional acceleration: prepend `HF_XET_HIGH_PERFORMANCE=1`
+#      # Fallback if the CLI misbehaves:
+#      #   python -c "from huggingface_hub import snapshot_download; \
+#      #     snapshot_download('Qwen/Qwen2.5-72B-Instruct-AWQ', \
+#      #     local_dir='/data/models/Qwen2.5-72B-AWQ')"
 #   3. bash scripts/start_vllm.sh
+#      # Or skip step 2 and let vLLM auto-download on first start:
+#      #   MODEL_PATH=Qwen/Qwen2.5-72B-Instruct-AWQ bash scripts/start_vllm.sh
 #
 # Override defaults with env vars, e.g.:
 #   MODEL_PATH=/data/models/Qwen2.5-72B-AWQ TP=4 PORT=8000 bash scripts/start_vllm.sh
