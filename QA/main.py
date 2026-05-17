@@ -51,6 +51,17 @@ parser.add_argument("--n_shots", type=int, default=3)  # 默认为 3
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--initial_demo", type=str, default="This is an initial example.")
 parser.add_argument("--memory_path", type=str, default="memory.json")
+# Retrieval — semantic embedding matches the paper's intent
+# (论文 5.1: text-embedding-ada-002 for QA Agent). Levenshtein is the original
+# repo fallback kept for backwards compatibility.
+parser.add_argument("--retrieval", type=str, default="semantic",
+                    choices=["semantic", "levenshtein"],
+                    help="In-context demo retrieval: 'semantic' uses sentence-transformers "
+                         "cosine similarity; 'levenshtein' uses character edit distance.")
+parser.add_argument("--embedding_model", type=str,
+                    default="sentence-transformers/all-MiniLM-L6-v2",
+                    help="HuggingFace id or local path for the embedding model. "
+                         "Same default as EHRAgent / RAP for consistency.")
 # Sample sizes — defaults match the paper's MMLU per-pair configuration.
 parser.add_argument("--num_benign", type=int, default=30,
                     help="paper-default for MMLU is 30")
@@ -79,6 +90,42 @@ for entry in victim_target_data:
     note_num = len(notes)
 
 templates_file = f"templates_{victim}.json"
+
+
+# ============ 语义检索 helpers（lazy-init，避免 levenshtein 模式时强行加载 ST） ============
+_embedding_model = None
+_embedding_cache: dict = {}   # question_text -> np.ndarray (cached embedding)
+
+
+def _get_embedding_model():
+    """Lazy-load the sentence-transformers model on first use."""
+    global _embedding_model
+    if _embedding_model is None:
+        from sentence_transformers import SentenceTransformer
+        show(f"[retrieval] loading embedding model: {args.embedding_model}")
+        _embedding_model = SentenceTransformer(args.embedding_model)
+    return _embedding_model
+
+
+def _embed(texts):
+    """Encode `texts` into an (n, d) numpy array, caching by exact text."""
+    model = _get_embedding_model()
+    missing = [t for t in texts if t not in _embedding_cache]
+    if missing:
+        new_emb = model.encode(missing, convert_to_numpy=True, show_progress_bar=False)
+        for t, e in zip(missing, new_emb):
+            _embedding_cache[t] = e
+    return np.stack([_embedding_cache[t] for t in texts])
+
+
+def _cosine_topk(query, candidates, k):
+    """Return indices of top-k candidates ranked by cosine sim to query."""
+    q = _embed([query])
+    c = _embed(candidates)
+    q_norm = q / (np.linalg.norm(q, axis=1, keepdims=True) + 1e-12)
+    c_norm = c / (np.linalg.norm(c, axis=1, keepdims=True) + 1e-12)
+    sims = (q_norm @ c_norm.T)[0]
+    return np.argsort(sims)[::-1][:k].tolist()
 
 
 def llm(prompt):
@@ -303,15 +350,19 @@ def generate_prompt_and_response(question, options, memory, initial_demo, args):
         demos += initial_demo
         selected_indexes = []
     else:
-        # 从 memory 中检索相似问题（Levenshtein 距离方法）
-        levenshtein_dist = {
-            j: Levenshtein.distance(question, memory[j]['question']) for j in range(len(memory))
-        }
-        
-        # 按距离排序并选择前 n_shots 条
+        # 从 memory 中检索前 n_shots 个最相似 demo
         num_retrieve = min(args.n_shots, len(memory))
-        sorted_distances = sorted(levenshtein_dist.items(), key=lambda x: x[1])
-        selected_indexes = [sorted_distances[j][0] for j in range(min(num_retrieve, len(sorted_distances)))]
+        if args.retrieval == "semantic":
+            # 论文 5.1: text-embedding-ada-002；这里用本地等价的 all-MiniLM-L6-v2
+            mem_questions = [m["question"] for m in memory]
+            selected_indexes = _cosine_topk(question, mem_questions, num_retrieve)
+        else:
+            # Levenshtein 字符编辑距离（仓库原版的 fallback）
+            levenshtein_dist = {
+                j: Levenshtein.distance(question, memory[j]['question']) for j in range(len(memory))
+            }
+            sorted_distances = sorted(levenshtein_dist.items(), key=lambda x: x[1])
+            selected_indexes = [sorted_distances[j][0] for j in range(num_retrieve)]
         
         # 构建 demos
         demos = "Analyze the given question and options. Generate a reasoning process ('Thought') step by step, then select the correct answer based on your reasoning. Output the answer as the option label (character in the alphabet). Please think step by step.\n Here are {} examples:\n".format(len(selected_indexes))
